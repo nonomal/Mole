@@ -32,7 +32,7 @@ func collectCPU() (CPUStatus, error) {
 	}
 
 	// Two-call pattern for more reliable CPU usage.
-	cpu.Percent(0, true)
+	warmUpCPU()
 	time.Sleep(cpuSampleInterval)
 	percents, err := cpu.Percent(0, true)
 	var totalPercent float64
@@ -119,7 +119,10 @@ func getCoreTopology() (pCores, eCores int) {
 		return 0, 0
 	}
 
-	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var lines []string
+	for line := range strings.Lines(strings.TrimSpace(out)) {
+		lines = append(lines, line)
+	}
 	if len(lines) < 4 {
 		return 0, 0
 	}
@@ -251,4 +254,8 @@ func fallbackCPUUtilization(logical int) (float64, []float64, error) {
 		perCore[i] = avg
 	}
 	return avg, perCore, nil
+}
+
+func warmUpCPU() {
+	cpu.Percent(0, true) //nolint:errcheck
 }

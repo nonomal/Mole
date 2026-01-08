@@ -32,7 +32,7 @@ const (
 	iconProcs   = "❊"
 )
 
-// Mole body frames.
+// Mole body frames (facing right).
 var moleBody = [][]string{
 	{
 		`     /\_/\`,
@@ -60,25 +60,59 @@ var moleBody = [][]string{
 	},
 }
 
+// Mirror mole body frames (facing left).
+var moleBodyMirror = [][]string{
+	{
+		`    /\_/\`,
+		`   / o o \___`,
+		`  \ =-=   ___\`,
+		`  (m-m-(____/`,
+	},
+	{
+		`    /\_/\`,
+		`   / o o \___`,
+		`  \ =-=   ___\`,
+		`  (__mm(____/`,
+	},
+	{
+		`    /\_/\`,
+		`   / · · \___`,
+		`  \ =-=   ___\`,
+		`  (m__m-(___/`,
+	},
+	{
+		`    /\_/\`,
+		`   / o o \___`,
+		`  \ =-=   ___\`,
+		`  (-mm-(____/`,
+	},
+}
+
 // getMoleFrame renders the animated mole.
 func getMoleFrame(animFrame int, termWidth int) string {
-	bodyIdx := animFrame % len(moleBody)
-	body := moleBody[bodyIdx]
-
 	moleWidth := 15
-	maxPos := termWidth - moleWidth
-	if maxPos < 0 {
-		maxPos = 0
-	}
+	maxPos := max(termWidth-moleWidth, 0)
 
 	cycleLength := maxPos * 2
 	if cycleLength == 0 {
 		cycleLength = 1
 	}
 	pos := animFrame % cycleLength
-	if pos > maxPos {
+	movingLeft := pos > maxPos
+	if movingLeft {
 		pos = cycleLength - pos
 	}
+
+	// Use mirror frames when moving left
+	var frames [][]string
+	if movingLeft {
+		frames = moleBodyMirror
+	} else {
+		frames = moleBody
+	}
+
+	bodyIdx := animFrame % len(frames)
+	body := frames[bodyIdx]
 
 	padding := strings.Repeat(" ", pos)
 	var lines []string
@@ -96,7 +130,7 @@ type cardData struct {
 	lines []string
 }
 
-func renderHeader(m MetricsSnapshot, errMsg string, animFrame int, termWidth int) string {
+func renderHeader(m MetricsSnapshot, errMsg string, animFrame int, termWidth int, catHidden bool) string {
 	title := titleStyle.Render("Mole Status")
 
 	scoreStyle := getScoreStyle(m.HealthScore)
@@ -134,24 +168,35 @@ func renderHeader(m MetricsSnapshot, errMsg string, animFrame int, termWidth int
 
 	headerLine := title + "  " + scoreText + "  " + strings.Join(infoParts, " · ")
 
-	mole := getMoleFrame(animFrame, termWidth)
+	// Show cat unless hidden
+	var mole string
+	if !catHidden {
+		mole = getMoleFrame(animFrame, termWidth)
+	}
 
 	if errMsg != "" {
+		if mole == "" {
+			return lipgloss.JoinVertical(lipgloss.Left, headerLine, "", dangerStyle.Render("ERROR: "+errMsg), "")
+		}
 		return lipgloss.JoinVertical(lipgloss.Left, headerLine, "", mole, dangerStyle.Render("ERROR: "+errMsg), "")
+	}
+	if mole == "" {
+		return headerLine
 	}
 	return headerLine + "\n" + mole
 }
 
 func getScoreStyle(score int) lipgloss.Style {
-	if score >= 90 {
+	switch {
+	case score >= 90:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#87FF87")).Bold(true)
-	} else if score >= 75 {
+	case score >= 75:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#87D787")).Bold(true)
-	} else if score >= 60 {
+	case score >= 60:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD75F")).Bold(true)
-	} else if score >= 40 {
+	case score >= 40:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFAF5F")).Bold(true)
-	} else {
+	default:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Bold(true)
 	}
 }
@@ -197,10 +242,7 @@ func renderCPUCard(cpu CPUStatus) cardData {
 		}
 		sort.Slice(cores, func(i, j int) bool { return cores[i].val > cores[j].val })
 
-		maxCores := 3
-		if len(cores) < maxCores {
-			maxCores = len(cores)
-		}
+		maxCores := min(len(cores), 3)
 		for i := 0; i < maxCores; i++ {
 			c := cores[i]
 			lines = append(lines, fmt.Sprintf("Core%-2d %s  %5.1f%%", c.idx+1, progressBar(c.val), c.val))
@@ -217,28 +259,6 @@ func renderCPUCard(cpu CPUStatus) cardData {
 	}
 
 	return cardData{icon: iconCPU, title: "CPU", lines: lines}
-}
-
-func renderGPUCard(gpus []GPUStatus) cardData {
-	var lines []string
-	if len(gpus) == 0 {
-		lines = append(lines, subtleStyle.Render("No GPU detected"))
-	} else {
-		for _, g := range gpus {
-			if g.Usage >= 0 {
-				lines = append(lines, fmt.Sprintf("Total  %s  %5.1f%%", progressBar(g.Usage), g.Usage))
-			}
-			coreInfo := ""
-			if g.CoreCount > 0 {
-				coreInfo = fmt.Sprintf(" (%d cores)", g.CoreCount)
-			}
-			lines = append(lines, g.Name+coreInfo)
-			if g.Usage < 0 {
-				lines = append(lines, subtleStyle.Render("Run with sudo for usage metrics"))
-			}
-		}
-	}
-	return cardData{icon: iconGPU, title: "GPU", lines: lines}
 }
 
 func renderMemoryCard(mem MemoryStatus) cardData {
@@ -289,9 +309,10 @@ func renderMemoryCard(mem MemoryStatus) cardData {
 	if mem.Pressure != "" {
 		pressureStyle := okStyle
 		pressureText := "Status " + mem.Pressure
-		if mem.Pressure == "warn" {
+		switch mem.Pressure {
+		case "warn":
 			pressureStyle = warnStyle
-		} else if mem.Pressure == "critical" {
+		case "critical":
 			pressureStyle = dangerStyle
 		}
 		lines = append(lines, pressureStyle.Render(pressureText))
@@ -356,10 +377,7 @@ func formatDiskLine(label string, d DiskStatus) string {
 }
 
 func ioBar(rate float64) string {
-	filled := int(rate / 10.0)
-	if filled > 5 {
-		filled = 5
-	}
+	filled := min(int(rate/10.0), 5)
 	if filled < 0 {
 		filled = 0
 	}
@@ -391,10 +409,7 @@ func renderProcessCard(procs []ProcessInfo) cardData {
 }
 
 func miniBar(percent float64) string {
-	filled := int(percent / 20)
-	if filled > 5 {
-		filled = 5
-	}
+	filled := min(int(percent/20), 5)
 	if filled < 0 {
 		filled = 0
 	}
@@ -437,10 +452,7 @@ func renderNetworkCard(netStats []NetworkStatus, proxy ProxyStatus) cardData {
 }
 
 func netBar(rate float64) string {
-	filled := int(rate / 2.0)
-	if filled > 5 {
-		filled = 5
-	}
+	filled := min(int(rate/2.0), 5)
 	if filled < 0 {
 		filled = 0
 	}
@@ -501,6 +513,7 @@ func renderBatteryCard(batts []BatteryStatus, thermal ThermalStatus) cardData {
 				statusText += fmt.Sprintf(" · %.0fW Adapter", thermal.AdapterPower)
 			}
 		} else if thermal.BatteryPower > 0 {
+			// Only show battery power when discharging (positive value)
 			statusText += fmt.Sprintf(" · %.0fW", thermal.BatteryPower)
 		}
 		lines = append(lines, statusStyle.Render(statusText+statusIcon))
@@ -551,10 +564,7 @@ func renderSensorsCard(sensors []SensorReading) cardData {
 
 func renderCard(data cardData, width int, height int) string {
 	titleText := data.icon + " " + data.title
-	lineLen := width - lipgloss.Width(titleText) - 2
-	if lineLen < 4 {
-		lineLen = 4
-	}
+	lineLen := max(width-lipgloss.Width(titleText)-2, 4)
 	header := titleStyle.Render(titleText) + "  " + lineStyle.Render(strings.Repeat("╌", lineLen))
 	content := header + "\n" + strings.Join(data.lines, "\n")
 
@@ -576,7 +586,7 @@ func progressBar(percent float64) string {
 	filled := int(percent / 100 * float64(total))
 
 	var builder strings.Builder
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if i < filled {
 			builder.WriteString("█")
 		} else {
@@ -597,7 +607,7 @@ func batteryProgressBar(percent float64) string {
 	filled := int(percent / 100 * float64(total))
 
 	var builder strings.Builder
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if i < filled {
 			builder.WriteString("█")
 		} else {
@@ -698,11 +708,11 @@ func humanBytesCompact(v uint64) string {
 	}
 }
 
-func shorten(s string, max int) string {
-	if len(s) <= max {
+func shorten(s string, maxLen int) string {
+	if len(s) <= maxLen {
 		return s
 	}
-	return s[:max-1] + "…"
+	return s[:maxLen-1] + "…"
 }
 
 func renderTwoColumns(cards []cardData, width int) string {
