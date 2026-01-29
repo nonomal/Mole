@@ -493,6 +493,9 @@ should_protect_data() {
 # Check if a path is protected from deletion
 # Centralized logic to protect system settings, control center, and critical apps
 #
+# In uninstall mode (MOLE_UNINSTALL_MODE=1), only system-critical components are protected.
+# Data-protected apps (VPNs, dev tools, etc.) can be uninstalled when user explicitly chooses to.
+#
 # Args: $1 - path to check
 # Returns: 0 if protected, 1 if safe to delete
 should_protect_path() {
@@ -577,17 +580,31 @@ should_protect_path() {
 
     # 6. Match full path against protected patterns
     # This catches things like /Users/tw93/Library/Caches/Claude when pattern is *Claude*
-    for pattern in "${SYSTEM_CRITICAL_BUNDLES[@]}" "${DATA_PROTECTED_BUNDLES[@]}"; do
-        if bundle_matches_pattern "$path" "$pattern"; then
-            return 0
-        fi
-    done
+    # In uninstall mode, only check system-critical bundles (user explicitly chose to uninstall)
+    if [[ "${MOLE_UNINSTALL_MODE:-0}" == "1" ]]; then
+        # Uninstall mode: only protect system-critical components
+        for pattern in "${SYSTEM_CRITICAL_BUNDLES[@]}"; do
+            if bundle_matches_pattern "$path" "$pattern"; then
+                return 0
+            fi
+        done
+    else
+        # Normal mode (cleanup): protect both system-critical and data-protected bundles
+        for pattern in "${SYSTEM_CRITICAL_BUNDLES[@]}" "${DATA_PROTECTED_BUNDLES[@]}"; do
+            if bundle_matches_pattern "$path" "$pattern"; then
+                return 0
+            fi
+        done
+    fi
 
     # 7. Check if the filename itself matches any protected patterns
-    local filename
-    filename=$(basename "$path")
-    if should_protect_data "$filename"; then
-        return 0
+    # Skip in uninstall mode - user explicitly chose to remove this app
+    if [[ "${MOLE_UNINSTALL_MODE:-0}" != "1" ]]; then
+        local filename
+        filename=$(basename "$path")
+        if should_protect_data "$filename"; then
+            return 0
+        fi
     fi
 
     return 1
@@ -643,11 +660,36 @@ is_path_whitelisted() {
 find_app_files() {
     local bundle_id="$1"
     local app_name="$2"
+
+    # Early validation: require at least one valid identifier
+    # Skip scanning if both bundle_id and app_name are invalid
+    if [[ -z "$bundle_id" || "$bundle_id" == "unknown" ]] &&
+        [[ -z "$app_name" || ${#app_name} -lt 2 ]]; then
+        return 0 # Silent return to avoid invalid scanning
+    fi
+
     local -a files_to_clean=()
 
-    # Normalize app name for matching
-    local nospace_name="${app_name// /}"
-    local underscore_name="${app_name// /_}"
+    # Normalize app name for matching - generate all common naming variants
+    # Apps use inconsistent naming: "Maestro Studio" vs "maestro-studio" vs "MaestroStudio"
+    # Note: Using tr for lowercase conversion (Bash 3.2 compatible, no ${var,,} support)
+    local nospace_name="${app_name// /}"                                               # "Maestro Studio" -> "MaestroStudio"
+    local underscore_name="${app_name// /_}"                                           # "Maestro Studio" -> "Maestro_Studio"
+    local hyphen_name="${app_name// /-}"                                               # "Maestro Studio" -> "Maestro-Studio"
+    local lowercase_name=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')              # "Zed Nightly" -> "zed nightly"
+    local lowercase_nospace=$(echo "$nospace_name" | tr '[:upper:]' '[:lower:]')       # "MaestroStudio" -> "maestrostudio"
+    local lowercase_hyphen=$(echo "$hyphen_name" | tr '[:upper:]' '[:lower:]')         # "Maestro-Studio" -> "maestro-studio"
+    local lowercase_underscore=$(echo "$underscore_name" | tr '[:upper:]' '[:lower:]') # "Maestro_Studio" -> "maestro_studio"
+
+    # Extract base name by removing common version/channel suffixes
+    # "Zed Nightly" -> "Zed", "Firefox Developer Edition" -> "Firefox"
+    local base_name="$app_name"
+    local version_suffixes="Nightly|Beta|Alpha|Dev|Canary|Preview|Insider|Edge|Stable|Release|RC|LTS"
+    version_suffixes+="|Developer Edition|Technology Preview"
+    if [[ "$app_name" =~ ^(.+)[[:space:]]+(${version_suffixes})$ ]]; then
+        base_name="${BASH_REMATCH[1]}"
+    fi
+    local base_lowercase=$(echo "$base_name" | tr '[:upper:]' '[:lower:]') # "Zed" -> "zed"
 
     # Standard path patterns for user-level files
     local -a user_patterns=(
@@ -665,7 +707,6 @@ find_app_files() {
         "$HOME/Library/HTTPStorages/$bundle_id"
         "$HOME/Library/Cookies/$bundle_id.binarycookies"
         "$HOME/Library/LaunchAgents/$bundle_id.plist"
-        "$HOME/Library/LaunchDaemons/$bundle_id.plist"
         "$HOME/Library/Application Scripts/$bundle_id"
         "$HOME/Library/Services/$app_name.workflow"
         "$HOME/Library/QuickLook/$app_name.qlgenerator"
@@ -690,13 +731,35 @@ find_app_files() {
         "$HOME/.$app_name"rc
     )
 
-    # Add sanitized name variants if unique enough
+    # Add all naming variants to cover inconsistent app directory naming
+    # Issue #377: Apps create directories with various naming conventions
     if [[ ${#app_name} -gt 3 && "$app_name" =~ [[:space:]] ]]; then
         user_patterns+=(
+            # Compound naming (MaestroStudio, Maestro_Studio, Maestro-Studio)
             "$HOME/Library/Application Support/$nospace_name"
             "$HOME/Library/Caches/$nospace_name"
             "$HOME/Library/Logs/$nospace_name"
             "$HOME/Library/Application Support/$underscore_name"
+            "$HOME/Library/Application Support/$hyphen_name"
+            # Lowercase variants (maestrostudio, maestro-studio, maestro_studio)
+            "$HOME/.config/$lowercase_nospace"
+            "$HOME/.config/$lowercase_hyphen"
+            "$HOME/.config/$lowercase_underscore"
+            "$HOME/.local/share/$lowercase_nospace"
+            "$HOME/.local/share/$lowercase_hyphen"
+            "$HOME/.local/share/$lowercase_underscore"
+        )
+    fi
+
+    # Add base name variants for versioned apps (e.g., "Zed Nightly" -> check for "zed")
+    if [[ "$base_name" != "$app_name" && ${#base_name} -gt 2 ]]; then
+        user_patterns+=(
+            "$HOME/Library/Application Support/$base_name"
+            "$HOME/Library/Caches/$base_name"
+            "$HOME/Library/Logs/$base_name"
+            "$HOME/.config/$base_lowercase"
+            "$HOME/.local/share/$base_lowercase"
+            "$HOME/.$base_lowercase"
         )
     fi
 
@@ -740,17 +803,26 @@ find_app_files() {
         fi
     fi
 
-    # Launch Agents and Daemons by name (special handling)
-    if [[ ${#app_name} -gt 3 ]]; then
-        if [[ -d ~/Library/LaunchAgents ]]; then
+    # Launch Agents by name (special handling)
+    # Note: LaunchDaemons are system-level and handled in find_app_system_files()
+    # Minimum 5-char threshold prevents false positives (e.g., "Time" matching system agents)
+    # Short-name apps (e.g., Zoom, Arc) are still cleaned via bundle_id matching above
+    # Security: Common words are excluded to prevent matching unrelated plist files
+    if [[ ${#app_name} -ge 5 ]] && [[ -d ~/Library/LaunchAgents ]]; then
+        # Skip common words that could match many unrelated LaunchAgents
+        # These are either generic terms or names that overlap with system/common utilities
+        local common_words="Music|Notes|Photos|Finder|Safari|Preview|Calendar|Contacts|Messages|Reminders|Clock|Weather|Stocks|Books|News|Podcasts|Voice|Files|Store|System|Helper|Agent|Daemon|Service|Update|Sync|Backup|Cloud|Manager|Monitor|Server|Client|Worker|Runner|Launcher|Driver|Plugin|Extension|Widget|Utility"
+        if [[ "$app_name" =~ ^($common_words)$ ]]; then
+            debug_log "Skipping LaunchAgent name search for common word: $app_name"
+        else
             while IFS= read -r -d '' plist; do
+                local plist_name=$(basename "$plist")
+                # Skip Apple's LaunchAgents
+                if [[ "$plist_name" =~ ^com\.apple\. ]]; then
+                    continue
+                fi
                 files_to_clean+=("$plist")
-            done < <(command find ~/Library/LaunchAgents -maxdepth 1 \( -name "*$app_name*.plist" \) -print0 2> /dev/null)
-        fi
-        if [[ -d ~/Library/LaunchDaemons ]]; then
-            while IFS= read -r -d '' plist; do
-                files_to_clean+=("$plist")
-            done < <(command find ~/Library/LaunchDaemons -maxdepth 1 \( -name "*$app_name*.plist" \) -print0 2> /dev/null)
+            done < <(command find ~/Library/LaunchAgents -maxdepth 1 -name "*$app_name*.plist" -print0 2> /dev/null)
         fi
     fi
 
@@ -764,7 +836,7 @@ find_app_files() {
 
     # 2. Android Studio (Google)
     if [[ "$app_name" =~ Android.*Studio|android.*studio ]] || [[ "$bundle_id" =~ google.*android.*studio|jetbrains.*android ]]; then
-        for d in ~/AndroidStudioProjects ~/Library/Android ~/.android ~/.gradle; do
+        for d in ~/AndroidStudioProjects ~/Library/Android ~/.android; do
             [[ -d "$d" ]] && files_to_clean+=("$d")
         done
         [[ -d ~/Library/Application\ Support/Google ]] && while IFS= read -r -d '' d; do files_to_clean+=("$d"); done < <(command find ~/Library/Application\ Support/Google -maxdepth 1 -name "AndroidStudio*" -print0 2> /dev/null)
@@ -805,8 +877,11 @@ find_app_system_files() {
     local app_name="$2"
     local -a system_files=()
 
-    # Sanitized App Name (remove spaces)
+    # Generate all naming variants (same as find_app_files for consistency)
     local nospace_name="${app_name// /}"
+    local underscore_name="${app_name// /_}"
+    local hyphen_name="${app_name// /-}"
+    local lowercase_hyphen=$(echo "$hyphen_name" | tr '[:upper:]' '[:lower:]')
 
     # Standard system path patterns
     local -a system_patterns=(
@@ -832,11 +907,16 @@ find_app_system_files() {
         "/Library/Caches/$app_name"
     )
 
+    # Add all naming variants for apps with spaces in name
     if [[ ${#app_name} -gt 3 && "$app_name" =~ [[:space:]] ]]; then
         system_patterns+=(
             "/Library/Application Support/$nospace_name"
             "/Library/Caches/$nospace_name"
             "/Library/Logs/$nospace_name"
+            "/Library/Application Support/$underscore_name"
+            "/Library/Application Support/$hyphen_name"
+            "/Library/Caches/$hyphen_name"
+            "/Library/Caches/$lowercase_hyphen"
         )
     fi
 
@@ -904,6 +984,13 @@ find_app_receipt_files() {
     # Skip if no bundle ID
     [[ -z "$bundle_id" || "$bundle_id" == "unknown" ]] && return 0
 
+    # Validate bundle_id format to prevent wildcard injection
+    # Only allow alphanumeric characters, dots, hyphens, and underscores
+    if [[ ! "$bundle_id" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        debug_log "Invalid bundle_id format: $bundle_id"
+        return 0
+    fi
+
     local -a receipt_files=()
     local -a bom_files=()
 
@@ -934,6 +1021,15 @@ find_app_receipt_files() {
                 if [[ "$clean_path" != /* ]]; then
                     clean_path="/$clean_path"
                 fi
+
+                # Path traversal protection: reject paths containing ..
+                if [[ "$clean_path" =~ \.\. ]]; then
+                    debug_log "Rejected path traversal in BOM: $clean_path"
+                    continue
+                fi
+
+                # Normalize path (remove duplicate slashes)
+                clean_path=$(tr -s "/" <<< "$clean_path")
 
                 # ------------------------------------------------------------------------
                 # Safety check: restrict removal to trusted paths

@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/disk"
-	"github.com/shirou/gopsutil/v3/host"
-	"github.com/shirou/gopsutil/v3/net"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/net"
 )
 
 // RingBuffer is a fixed-size circular buffer for float64 values.
@@ -276,7 +276,8 @@ func (c *Collector) Collect() (MetricsSnapshot, error) {
 	collect(func() (err error) { proxyStats = collectProxy(); return nil })
 	collect(func() (err error) { batteryStats, _ = collectBatteries(); return nil })
 	collect(func() (err error) { thermalStats = collectThermal(); return nil })
-	collect(func() (err error) { sensorStats, _ = collectSensors(); return nil })
+	// Sensors disabled - CPU temp already shown in CPU card
+	// collect(func() (err error) { sensorStats, _ = collectSensors(); return nil })
 	collect(func() (err error) { gpuStats, err = c.collectGPU(now); return })
 	collect(func() (err error) {
 		// Bluetooth is slow; cache for 30s.
